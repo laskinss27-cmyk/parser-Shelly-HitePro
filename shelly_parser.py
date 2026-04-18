@@ -411,7 +411,7 @@ class ShellyParser:
             json.dump(simple_products, f, ensure_ascii=False, indent=2)
         
         print(f"\n  Финальные данные сохранены в {filepath}")
-        print(f  "Упрощённая версия в {simple_path}")
+        print(f"Упрощённая версия в {simple_path}")
     
     def _print_statistics(self) -> None:
         """Вывод статистики"""
