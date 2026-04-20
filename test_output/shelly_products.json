@@ -1,0 +1,13 @@
+{
+  "brand": "Shelly",
+  "total_count": 0,
+  "products": [],
+  "errors": [
+    {
+      "timestamp": "2026-04-20T15:34:57.002281",
+      "error": "BrowserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium-1117/chrome-linux/chrome\n╔════════════════════════════════════════════════════════════╗\n║ Looks like Playwright was just installed or updated.       ║\n║ Please run the following command to download new browsers: ║\n║                                                            ║\n║     playwright install                                     ║\n║                                                            ║\n║ <3 Playwright Team                                         ║\n╚════════════════════════════════════════════════════════════╝",
+      "type": "Error"
+    }
+  ],
+  "parsed_at": "2026-04-20T15:34:57.002733"
+}

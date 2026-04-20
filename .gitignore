@@ -1,4 +1,17 @@
-```python
+```
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+
+# PyInstaller
+*.spec
+
+# Test output
+test_output/
 ```

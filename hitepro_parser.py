@@ -1,265 +1,142 @@
 """
-Парсер каталога Hite Pro (WooCommerce)
-https://www.hite-pro.ru/shop
+Парсер каталога HitePro - версия с точными селекторами
+https://www.hite-pro.ru
 """
 
-import asyncio
-import json
-import re
+import requests
+from bs4 import BeautifulSoup
 import time
-from datetime import datetime
-from typing import Dict, List, Optional, Set
-from pathlib import Path
-
-from playwright.async_api import async_playwright, Page
-
+import random
+import re
+from typing import List, Dict, Optional
+import json
+from urllib.parse import urljoin
 
 class HiteProParser:
-    """Парсер каталога Hite Pro (WooCommerce)"""
-    
-    BASE_URL = "https://www.hite-pro.ru"
-    CATALOG_URL = f"{BASE_URL}/shop"
-    
-    def __init__(self, output_dir: str = "parsed_data"):
-        self.products: List[Dict] = []
-        self.seen_urls: Set[str] = set()
-        self.errors: List[Dict] = []
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
-        
-    async def run(self) -> List[Dict]:
-        """Запуск парсинга"""
-        print("=" * 60)
-        print("HitePro Parser v1.0 (WooCommerce)")
-        print(f"Старт: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 60)
-        
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            )
-            page = await context.new_page()
-            
-            print(f"\n[1/3] Загрузка каталога: {self.CATALOG_URL}")
-            await page.goto(self.CATALOG_URL, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(2)
-            
-            print("[2/3] Извлечение ссылок на товары...")
-            product_urls = await self._extract_product_urls(page)
-            print(f"Найдено {len(product_urls)} товаров")
-            
-            print("[3/3] Обработка товаров...")
-            for idx, url in enumerate(product_urls, 1):
-                print(f"  {idx}/{len(product_urls)}: {url.split('/')[-2]}")
-                
-                product_data = await self._get_product_details(page, url)
-                if product_data:
-                    self.products.append(product_data)
-                
-                if idx % 20 == 0:
-                    self._save_intermediate()
-                
-                await asyncio.sleep(0.5)
-            
-            await browser.close()
-        
-        self._save_final()
-        self._print_statistics()
-        
-        return self.products
-    
-    async def _extract_product_urls(self, page: Page) -> List[str]:
-        """Извлечение URL товаров из каталога WooCommerce"""
-        urls = await page.evaluate('''
-            () => {
-                const urls = new Set();
-                
-                // WooCommerce классы для товаров
-                const productLinks = document.querySelectorAll(
-                    'a.woocommerce-LoopProduct-link, ' +
-                    'a.product_type_simple, ' +
-                    'div.product a, ' +
-                    'li.product a'
-                );
-                
-                for (const link of productLinks) {
-                    let href = link.href;
-                    if (href && href.includes('/product/')) {
-                        href = href.split('?')[0].split('#')[0];
-                        urls.add(href);
-                    }
-                }
-                
-                return Array.from(urls);
-            }
-        ''')
-        
-        valid_urls = []
-        for url in urls:
-            if url not in self.seen_urls and self.BASE_URL in url:
-                self.seen_urls.add(url)
-                valid_urls.append(url)
-        
-        return valid_urls
-    
-    async def _get_product_details(self, page: Page, url: str) -> Optional[Dict]:
-        """Получение детальной информации о товаре Hite Pro"""
+    def __init__(self):
+        self.base_url = "https://www.hite-pro.ru"
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://www.google.com/',
+            'Connection': 'keep-alive'
+        }
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+
+    def get_page(self, url: str) -> Optional[str]:
         try:
-            await page.goto(url, wait_until="networkidle", timeout=15000)
-            await asyncio.sleep(1)
-            
-            data = await page.evaluate('''
-                () => {
-                    const data = {
-                        url: window.location.href,
-                        title: '',
-                        sku: '',
-                        price: '',
-                        in_stock: true,
-                        categories: [],
-                        description: '',
-                        short_description: '',
-                        attributes: {},
-                        has_alice: false,
-                        dimmable: false,
-                        voltage: null,
-                        power: null,
-                        product_type: null
-                    };
-                    
-                    // Название
-                    const titleEl = document.querySelector('h1.product_title, h1.entry-title');
-                    if (titleEl) data.title = titleEl.innerText.trim();
-                    
-                    // Артикул (SKU)
-                    const skuEl = document.querySelector('.sku, [class*="sku"]');
-                    if (skuEl) data.sku = skuEl.innerText.trim();
-                    
-                    // Цена
-                    const priceEl = document.querySelector('.price, [class*="price"]');
-                    if (priceEl) data.price = priceEl.innerText.trim();
-                    
-                    // Наличие
-                    const stockEl = document.querySelector('.stock, [class*="stock"], .in-stock, .out-of-stock');
-                    if (stockEl) {
-                        const stockText = stockEl.innerText.toLowerCase();
-                        data.in_stock = stockText.includes('in stock') || stockText.includes('в наличии');
-                    }
-                    
-                    // Категории
-                    const catEls = document.querySelectorAll('.posted_in a, .product_meta a[rel="tag"]');
-                    for (const el of catEls) {
-                        data.categories.push(el.innerText.trim());
-                    }
-                    
-                    // Описание
-                    const descEl = document.querySelector('.woocommerce-product-details__description, .product-description, [class*="description"]');
-                    if (descEl) data.description = descEl.innerText.trim();
-                    
-                    // Короткое описание
-                    const shortDescEl = document.querySelector('.woocommerce-product-details__short-description, .product-short-description');
-                    if (shortDescEl) data.short_description = shortDescEl.innerText.trim();
-                    
-                    // Характеристики (WooCommerce attributes)
-                    const attrTable = document.querySelector('table.woocommerce-product-attributes, .attributes_table');
-                    if (attrTable) {
-                        const rows = attrTable.querySelectorAll('tr');
-                        for (const row of rows) {
-                            const key = row.querySelector('th')?.innerText?.trim();
-                            const val = row.querySelector('td')?.innerText?.trim();
-                            if (key && val) {
-                                data.attributes[key] = val;
-                                
-                                // Определяем тип продукта
-                                if (key.toLowerCase().includes('тип') || key.toLowerCase().includes('type')) {
-                                    data.product_type = val;
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Поиск по тексту
-                    const fullText = (data.title + ' ' + data.description + ' ' + data.short_description + ' ' + JSON.stringify(data.attributes)).toLowerCase();
-                    
-                    // Поддержка Алисы
-                    data.has_alice = /алис|alice|яндекс|yandex|голос|voice/i.test(fullText);
-                    
-                    // Диммируемость
-                    data.dimmable = /диммир|dim|dimmable|регулир|brightness/i.test(fullText);
-                    
-                    // Напряжение
-                    const voltageMatch = fullText.match(/(\\d+)[-–]?(\\d+)?\\s*[вv]/i);
-                    if (voltageMatch) data.voltage = voltageMatch[0];
-                    
-                    // Мощность
-                    const powerMatch = fullText.match(/(\\d+)[-–]?(\\d+)?\\s*[втw]/i);
-                    if (powerMatch) data.power = powerMatch[0];
-                    
-                    return data;
-                }
-            ''')
-            
-            return data
-            
+            response = self.session.get(url, timeout=15)
+            if response.status_code == 200:
+                return response.text
+            else:
+                print(f"Ошибка {response.status_code} при доступе к {url}")
+                return None
         except Exception as e:
-            self.errors.append({'url': url, 'error': str(e)})
+            print(f"Ошибка соединения: {e}")
             return None
-    
-    def _save_intermediate(self) -> None:
-        """Сохранение промежуточных результатов"""
-        filepath = self.output_dir / "hitepro_intermediate.json"
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump({
-                'products': self.products,
-                'count': len(self.products),
-                'timestamp': datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
-    
-    def _save_final(self) -> None:
-        """Финальное сохранение"""
-        filepath = self.output_dir / "hitepro_products.json"
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump({
-                'brand': 'HitePro',
-                'total_count': len(self.products),
-                'products': self.products,
-                'errors': self.errors,
-                'parsed_at': datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
-    
-    def _print_statistics(self) -> None:
-        """Вывод статистики"""
-        print("\n" + "=" * 60)
-        print("СТАТИСТИКА ПАРСИНГА HitePro")
-        print("=" * 60)
-        print(f"Всего товаров: {len(self.products)}")
-        print(f"Ошибок: {len(self.errors)}")
+
+    def parse_category(self, category_url: str, max_pages: int = 5) -> List[Dict]:
+        products = []
+        current_url = category_url
+        page_count = 0
         
-        if self.products:
-            with_alice = sum(1 for p in self.products if p.get('has_alice'))
-            dimmable = sum(1 for p in self.products if p.get('dimmable'))
-            in_stock = sum(1 for p in self.products if p.get('in_stock', True))
+        while current_url and page_count < max_pages and self.is_running:
+            print(f"Парсинг HitePro: {current_url}")
+            html = self.get_page(current_url)
+            if not html:
+                break
             
-            print(f"\nПоддерживают Алису: {with_alice} ({with_alice/len(self.products)*100:.1f}%)")
-            print(f"Диммируемые: {dimmable} ({dimmable/len(self.products)*100:.1f}%)")
-            print(f"В наличии: {in_stock} ({in_stock/len(self.products)*100:.1f}%)")
+            soup = BeautifulSoup(html, 'html.parser')
             
-            # Категории
-            all_cats = []
-            for p in self.products:
-                all_cats.extend(p.get('categories', []))
-            if all_cats:
-                from collections import Counter
-                print(f"\nПопулярные категории: {dict(Counter(all_cats).most_common(5))}")
+            # Точный селектор для карточек товаров HitePro
+            product_cards = soup.find_all('div', class_='product-grid-item')
+            
+            if not product_cards:
+                print("Не удалось найти карточки товаров на странице.")
+                break
 
+            for card in product_cards:
+                if not self.is_running:
+                    break
+                data = self.extract_product_data(card, current_url)
+                if data:
+                    products.append(data)
 
-async def main():
-    parser = HiteProParser()
-    products = await parser.run()
-    print(f"\n✅ Завершено! Обработано {len(products)} товаров.")
+            # Поиск следующей страницы
+            next_btn = soup.find('a', class_='next')
+            if not next_btn:
+                next_btn = soup.find('li', class_='next').find('a') if soup.find('li', class_='next') else None
+            
+            if next_btn and next_btn.get('href'):
+                href = next_btn['href']
+                if href.startswith('http'):
+                    current_url = href
+                else:
+                    current_url = urljoin(category_url, href)
+                page_count += 1
+                time.sleep(random.uniform(1.5, 2.5))
+            else:
+                break
+                
+        return products
 
+    def extract_product_data(self, card, page_url) -> Optional[Dict]:
+        try:
+            # Извлечение названия - точный селектор
+            title_el = card.find('h3', class_='wd-entities-title').find('a') if card.find('h3', class_='wd-entities-title') else None
+            
+            if not title_el:
+                return None
+                
+            title = title_el.get_text(strip=True)
+            link = title_el.get('href', '')
+            
+            if link and not link.startswith('http'):
+                link = urljoin(page_url, link)
+
+            # Извлечение цены - точный селектор
+            price_el = card.find('span', class_='woocommerce-Price-amount')
+            price_str = "0"
+            if price_el:
+                raw_price = price_el.get_text(strip=True)
+                nums = re.findall(r'\d+', raw_price.replace(' ', ''))
+                if nums:
+                    price_str = nums[0]
+            
+            # Извлечение SKU из data-атрибутов или кнопки
+            sku = "N/A"
+            if card.get('data-id'):
+                sku = str(card.get('data-id'))
+            else:
+                # Пробуем найти SKU в кнопке "В корзину"
+                add_to_cart_btn = card.find('a', class_='add_to_cart_button')
+                if add_to_cart_btn and add_to_cart_btn.get('data-product_sku'):
+                    sku = add_to_cart_btn.get('data-product_sku')
+
+            return {
+                "name": title,
+                "price": price_str,
+                "url": link,
+                "sku": sku,
+                "source": "HitePro"
+            }
+        except Exception as e:
+            print(f"Ошибка обработки карточки: {e}")
+            return None
+
+    def save_to_json(self, data: List[Dict], filename: str):
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"Сохранено {len(data)} товаров в {filename}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = HiteProParser()
+    parser.is_running = True
+    url = "https://www.hite-pro.ru/shop/c/besprovodnoj-umnyj-dom/bloki-upravleniya"
+    items = parser.parse_category(url, max_pages=2)
+    if items:
+        parser.save_to_json(items, "hitepro_test.json")
+    else:
+        print("Товары не найдены.")
