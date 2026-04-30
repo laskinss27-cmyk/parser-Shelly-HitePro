@@ -16,9 +16,18 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE = "https://www.hite-pro.ru"
-LIST_API = f"{BASE}/wp-json/wp/v2/product"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 SLEEP = 0.4
+
+# Категории умного дома (без расходников)
+SMART_HOME_CATEGORIES = [
+    ("bloki-upravleniya",   "Блоки управления"),
+    ("datchiki",            "Датчики"),
+    ("radiovyklyuchateli",  "Радиовыключатели"),
+    ("server-umnogo-doma",  "Сервер УД"),
+    ("komplekty",           "Комплекты"),
+]
+CATEGORY_URL = f"{BASE}/shop/c/besprovodnoj-umnyj-dom"
 
 
 class HiteProParser:
@@ -30,23 +39,26 @@ class HiteProParser:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
 
-    # ── список товаров через WP REST ────────────────────────────
+    # ── список товаров через crawl категорий УД ─────────────────
     def _fetch_index(self) -> list[dict[str, Any]]:
+        """Возвращает список словарей {url, slug, category} из категорий смарт-хома."""
         items: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            r = self.session.get(LIST_API, params={"per_page": 100, "page": page}, timeout=20)
-            if r.status_code == 400:  # выход за последнюю страницу
-                break
+        seen: set[str] = set()
+        url_re = re.compile(r'href="(https://www\.hite-pro\.ru/shop/goods/[a-z0-9-]+)/?"')
+
+        for slug, label in SMART_HOME_CATEGORIES:
+            url = f"{CATEGORY_URL}/{slug}/"
+            r = self.session.get(url, timeout=20)
             r.raise_for_status()
-            chunk = r.json()
-            if not chunk:
-                break
-            items.extend(chunk)
-            print(f"  страница {page}: +{len(chunk)} (всего {len(items)})")
-            if len(chunk) < 100:
-                break
-            page += 1
+            urls = sorted(set(url_re.findall(r.text)))
+            new = 0
+            for u in urls:
+                if u in seen:
+                    continue
+                seen.add(u)
+                items.append({"link": u, "slug": u.rstrip("/").rsplit("/", 1)[-1], "category": label})
+                new += 1
+            print(f"  {label}: {len(urls)} товаров (+{new} новых)")
             time.sleep(SLEEP)
         return items
 
@@ -112,13 +124,13 @@ class HiteProParser:
         print(f"[2/2] Парсинг карточек (sleep={SLEEP}s)...")
         for i, item in enumerate(index, 1):
             url = item.get("link", "")
-            slug = urlparse(url).path.rstrip("/").split("/")[-1] if url else item.get("slug", "")
+            slug = item.get("slug") or urlparse(url).path.rstrip("/").split("/")[-1]
             try:
                 r = self.session.get(url, timeout=20)
                 r.raise_for_status()
                 data = self._parse_card(r.text, url)
                 data["slug"] = slug
-                data["wp_id"] = item.get("id")
+                data["category"] = item.get("category", "")
                 self.products.append(data)
             except Exception as e:
                 self.errors.append({"url": url, "error": str(e)})
